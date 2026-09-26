@@ -11,5 +11,5 @@
    ------------------------------------------------------------------ */
 
 window.EARSHOT_CONFIG = {
-  spotifyClientId: '',
+  spotifyClientId: 'be8db6dc14d346e191455a084c29d313',
 };
