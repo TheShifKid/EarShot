@@ -159,10 +159,16 @@ const Spotify = (() => {
       await sleep(wait * 1000);
       return api(path, params, false);
     }
-    if (res.status === 403) {
-      throw new Error('Spotify refused the request (403). In development mode your Spotify account must be added under “User Management” in the app dashboard.');
+    if (!res.ok) {
+      /* Spotify explains most errors in the JSON body ({ error: { message } }).
+         Showing its exact words makes problems far easier to diagnose. */
+      const body = await res.json().catch(() => ({}));
+      const detail = body && body.error && body.error.message ? ` Spotify says: “${body.error.message}”.` : '';
+      if (res.status === 403) {
+        throw new Error(`Spotify refused the request (403).${detail} Check that your Spotify account is listed under “User Management” in the app dashboard, then disconnect and connect again.`);
+      }
+      throw new Error(`Spotify API error ${res.status}.${detail}`);
     }
-    if (!res.ok) throw new Error(`Spotify API error ${res.status}`);
     return res.json();
   }
 
