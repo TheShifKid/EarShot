@@ -381,7 +381,11 @@ const Feed = (() => {
     const labels = { login: 'Connect Spotify', loading: 'Tuning in…', ready: 'Tap to start', resume: 'Tap to resume', error: 'Try again' };
     const extras = mode === 'login' ? `
       <p class="gate-small">You’ll log in on spotify.com. Earshot never sees your password.</p>
-      ${Spotify.hasConfigClientId() ? '' : '<button type="button" class="text-btn" data-gate="change-id">Change Client ID</button>'}` : '';
+      ${Spotify.hasConfigClientId() ? '' : '<button type="button" class="text-btn" data-gate="change-id">Change Client ID</button>'}`
+      /* On errors, offer a way out: log out and pick a different account. */
+      : mode === 'error' && Spotify.isLoggedIn()
+        ? '<button type="button" class="text-btn" data-gate="logout">Disconnect and log in with another account</button>'
+        : '';
     gateBody.innerHTML = `${mode === 'login' || mode === 'ready' ? '<p class="gate-tag">New music, one swipe at a time. Swipe to skip, heart to keep.</p>' : ''}
       ${msg}${bigButton(labels[mode], mode === 'loading')}${extras}`;
   }
@@ -391,6 +395,7 @@ const Feed = (() => {
     if (!btn) return;
     const mode = gateEl.dataset.mode;
     if (btn.dataset.gate === 'change-id') { setGate('setup'); return; }
+    if (btn.dataset.gate === 'logout') { Spotify.logout(); setGate('login'); return; }
     if (mode === 'login') {
       try { await Spotify.login(); } catch (err) { setGate('login', err.message); }
     } else if (mode === 'error') {

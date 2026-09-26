@@ -66,6 +66,10 @@ const Spotify = (() => {
       code_challenge_method: 'S256',
       code_challenge: await challengeFor(verifier),
       state,
+      /* Always show Spotify's approval screen (with its "Not you?" link),
+         so it's clear WHICH Spotify account is connecting, even when the
+         browser is already logged in to spotify.com. */
+      show_dialog: 'true',
     });
     location.assign(`${AUTH_URL}?${params}`);
   }
