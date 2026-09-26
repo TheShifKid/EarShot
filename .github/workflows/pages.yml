@@ -25,6 +25,12 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      # "Cache busting": GitHub Pages tells browsers to keep files for 10
+      # minutes, so right after a deploy people could still get the OLD
+      # config.js or app code. Adding ?v=<commit id> to every CSS/JS link
+      # makes each deploy's files look like brand-new URLs to the browser.
+      - name: Stamp asset URLs with the commit id
+        run: sed -i -E "s/(href=\"style\.css|src=\"js\/[a-z]+\.js)\"/\1?v=${GITHUB_SHA::8}\"/g" index.html
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
