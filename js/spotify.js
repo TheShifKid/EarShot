@@ -169,7 +169,12 @@ const Spotify = (() => {
       const body = await res.json().catch(() => ({}));
       const detail = body && body.error && body.error.message ? ` Spotify says: “${body.error.message}”.` : '';
       if (res.status === 403) {
-        throw new Error(`Spotify refused the request (403).${detail} Check that your Spotify account is listed under “User Management” in the app dashboard, then disconnect and connect again.`);
+        /* Only point at User Management when that's actually the problem. */
+        const msg = (body && body.error && body.error.message) || '';
+        const hint = !msg || /regist|user/i.test(msg)
+          ? ' Check that your Spotify account is listed under “User Management” in the app dashboard, then disconnect and connect again.'
+          : '';
+        throw new Error(`Spotify refused the request (403).${detail}${hint}`);
       }
       throw new Error(`Spotify API error ${res.status}.${detail}`);
     }
@@ -200,7 +205,10 @@ const Spotify = (() => {
   async function search(q, offset, genre) {
     const data = await api('/search', {
       q, type: 'track', limit: String(LIMIT), offset: String(offset),
-      market: 'from_token', // use the logged-in user's country, so tracks are playable there
+      /* No `market` filter on purpose: market=from_token needs the
+         user-read-private permission ("Insufficient client scope" without
+         it). We ask for no permissions at all; a track that can't play in
+         your country simply stalls and the feed skips it. */
     });
     const items = (data.tracks && data.tracks.items) || [];
     return { tracks: items.map((t) => normalize(t, genre)).filter(Boolean), raw: items.length };
