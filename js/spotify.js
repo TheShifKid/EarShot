@@ -21,6 +21,13 @@ const Spotify = (() => {
   const API = 'https://api.spotify.com/v1';
   const LIMIT = 10; // small pages: works even under Spotify's strictest dev-mode limits
 
+  /* "Scopes" are the permissions shown on Spotify's approval screen. We ask
+     only to READ two things, and nothing can be changed in your account:
+       user-top-read              → your top artists/songs (For you + quiz)
+       user-read-recently-played  → what you played lately (quiz)
+     Whatever is read stays in this browser. */
+  const SCOPES = ['user-top-read', 'user-read-recently-played'];
+
   const clientId = () => ((window.EARSHOT_CONFIG && window.EARSHOT_CONFIG.spotifyClientId) || Store.get('clientId', '')).trim();
   const setClientId = (id) => Store.set('clientId', String(id).trim());
   const hasConfigClientId = () => !!(window.EARSHOT_CONFIG && window.EARSHOT_CONFIG.spotifyClientId);
@@ -30,6 +37,13 @@ const Spotify = (() => {
   const redirectUri = () => location.origin + location.pathname.replace(/index\.html$/, '');
 
   const isLoggedIn = () => !!Store.get('token', null);
+  /* A login from before the site asked for scopes can search but can't read
+     your listening, so the site asks for one fresh login. */
+  function hasScopes() {
+    const tok = Store.get('token', null);
+    const granted = String((tok && tok.scope) || '').split(' ');
+    return SCOPES.every((s) => granted.includes(s));
+  }
   function logout() {
     Store.set('token', null);
     document.dispatchEvent(new CustomEvent('earshot:auth'));
@@ -66,6 +80,7 @@ const Spotify = (() => {
       code_challenge_method: 'S256',
       code_challenge: await challengeFor(verifier),
       state,
+      scope: SCOPES.join(' '),
       /* Always show Spotify's approval screen (with its "Not you?" link),
          so it's clear WHICH Spotify account is connecting, even when the
          browser is already logged in to spotify.com. */
@@ -110,6 +125,7 @@ const Spotify = (() => {
     Store.set('token', {
       access: data.access_token,
       refresh: data.refresh_token || (prev && prev.refresh),
+      scope: data.scope != null ? data.scope : (prev && prev.scope) || '',
       expires: Date.now() + (data.expires_in || 3600) * 1000,
     });
   }
@@ -174,9 +190,9 @@ const Spotify = (() => {
         const hint = !msg || /regist|user/i.test(msg)
           ? ' Check that your Spotify account is listed under “User Management” in the app dashboard, then disconnect and connect again.'
           : '';
-        throw new Error(`Spotify refused the request (403).${detail}${hint}`);
+        throw Object.assign(new Error(`Spotify refused the request (403).${detail}${hint}`), { status: 403 });
       }
-      throw new Error(`Spotify API error ${res.status}.${detail}`);
+      throw Object.assign(new Error(`Spotify API error ${res.status}.${detail}`), { status: res.status });
     }
     return res.json();
   }
@@ -214,6 +230,50 @@ const Spotify = (() => {
     return { tracks: items.map((t) => normalize(t, genre)).filter(Boolean), raw: items.length };
   }
 
+  /* Some accounts/apps get smaller page-size limits; if 50 is refused
+     with "400 Bad Request", ask again with 10. */
+  async function withLimit(path, params) {
+    try {
+      return await api(path, { ...params, limit: '50' });
+    } catch (err) {
+      if (err.status === 400) return api(path, { ...params, limit: String(LIMIT) });
+      throw err;
+    }
+  }
+
+  /* Your top artists (last ~6 months + last ~4 weeks), best first. */
+  async function topArtists() {
+    const [mid, recent] = await Promise.allSettled([
+      withLimit('/me/top/artists', { time_range: 'medium_term' }),
+      withLimit('/me/top/artists', { time_range: 'short_term' }),
+    ]);
+    if (mid.status === 'rejected' && recent.status === 'rejected') throw mid.reason;
+    const seen = new Set();
+    const out = [];
+    [recent, mid].forEach((r) => {
+      if (r.status !== 'fulfilled') return;
+      (r.value.items || []).forEach((a) => {
+        if (!a || !a.name || seen.has(a.id)) return;
+        seen.add(a.id);
+        out.push({ id: a.id, name: a.name, genres: a.genres || [] });
+      });
+    });
+    return out.slice(0, 20);
+  }
+
+  /* Your most-played songs for a period: short_term ≈ 4 weeks,
+     medium_term ≈ 6 months, long_term ≈ about a year. */
+  async function topTracks(range) {
+    const data = await withLimit('/me/top/tracks', { time_range: range });
+    return (data.items || []).map((t) => normalize(t, '')).filter(Boolean);
+  }
+
+  /* The last songs you played on Spotify (anywhere: phone, desktop…). */
+  async function recentTracks() {
+    const data = await withLimit('/me/player/recently-played', {});
+    return (data.items || []).map((i) => normalize(i.track, '')).filter(Boolean);
+  }
+
   /* Tracks don't carry genres on Spotify, artists do. Cached per artist. */
   const genreCache = new Map();
   async function artistGenre(artistId) {
@@ -231,6 +291,7 @@ const Spotify = (() => {
 
   return {
     LIMIT, clientId, setClientId, hasConfigClientId, redirectUri,
-    isLoggedIn, login, logout, handleRedirect, search, artistGenre,
+    isLoggedIn, hasScopes, login, logout, handleRedirect, search, artistGenre,
+    topArtists, topTracks, recentTracks,
   };
 })();

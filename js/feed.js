@@ -11,26 +11,16 @@
    ------------------------------------------------------------------ */
 
 const Feed = (() => {
-  /* Spotify has no "give me random pop" endpoint, so each station is a list
-     of seed searches. `genre:"…"` and `artist:"…"` are Spotify search
-     filters; mixing both keeps the feed varied but on-topic. */
-  const GENRES = {
-    pop: { label: 'Pop', seeds: ['genre:pop', 'genre:"dance pop"', 'genre:pop year:2020-2026', 'genre:pop year:2010-2019', 'artist:"Dua Lipa"', 'artist:"Sabrina Carpenter"', 'artist:"Chappell Roan"', 'artist:"Charli xcx"', 'artist:"Olivia Rodrigo"', 'artist:"Lorde"'] },
-    hiphop: { label: 'Hip-hop', seeds: ['genre:"hip hop"', 'genre:rap', 'genre:"hip hop" year:2018-2026', 'artist:"Kendrick Lamar"', 'artist:"Tyler, The Creator"', 'artist:"Doechii"', 'artist:"OutKast"', 'artist:"Little Simz"', 'artist:"MF DOOM"', 'artist:"Missy Elliott"'] },
-    rock: { label: 'Rock', seeds: ['genre:rock', 'genre:"alternative rock"', 'genre:"classic rock"', 'artist:"Arctic Monkeys"', 'artist:"Queens of the Stone Age"', 'artist:"The Black Keys"', 'artist:"Fleetwood Mac"', 'artist:"The Strokes"', 'artist:"IDLES"', 'artist:"Foo Fighters"'] },
-    indie: { label: 'Indie', seeds: ['genre:indie', 'genre:"indie rock"', 'genre:"indie pop"', 'artist:"Phoebe Bridgers"', 'artist:"Tame Impala"', 'artist:"Beach House"', 'artist:"Alvvays"', 'artist:"Big Thief"', 'artist:"Japanese Breakfast"', 'artist:"Vampire Weekend"'] },
-    electronic: { label: 'Electronic', seeds: ['genre:electronic', 'genre:house', 'genre:techno', 'artist:"Fred again.."', 'artist:"Daft Punk"', 'artist:"Bicep"', 'artist:"Caribou"', 'artist:"Jamie xx"', 'artist:"KAYTRANADA"', 'artist:"Four Tet"'] },
-    rnb: { label: 'R&B', seeds: ['genre:"r&b"', 'genre:soul', 'genre:"neo soul"', 'artist:"SZA"', 'artist:"Frank Ocean"', 'artist:"Daniel Caesar"', 'artist:"Kali Uchis"', 'artist:"Steve Lacy"', 'artist:"Jorja Smith"', 'artist:"Erykah Badu"'] },
-    chill: { label: 'Chill', seeds: ['genre:chill', 'genre:"lo-fi"', 'genre:ambient', 'genre:acoustic', 'artist:"Khruangbin"', 'artist:"Bon Iver"', 'artist:"Men I Trust"', 'artist:"Nujabes"', 'artist:"Norah Jones"', 'artist:"Mazzy Star"'] },
-  };
-  const MAX_ROUNDS = 8;      // pages deep per seed before a station runs dry
+  /* Station seed lists live in taste.js (shared with the "For you" recommender). */
+  const GENRES = Taste.STATIONS;
+  const MAX_ROUNDS = 8;      // pages deep per seed search before it counts as used up
   const PER_ARTIST_CAP = 3;  // keep one artist from flooding a batch
 
   const state = {
-    genre: 'mix', query: '', seeds: [], cursor: 0, round: 0,
+    genre: 'foryou', query: '', seeds: [], cursor: 0, offsets: new Map(),
     tracks: [], cards: [], seen: new Set(),
     loading: false, exhausted: false, lastError: null, active: -1, unlocked: false,
-    requestId: 0, scrollMemory: 0, lastGesture: 0, playWasTapped: false,
+    requestId: 0, scrollMemory: 0, lastGesture: 0, playWasTapped: false, activeSince: 0, stale: false,
   };
   let feedEl, statusEl, gateEl, gateBody, observer, markedCard = null;
 
@@ -50,7 +40,11 @@ const Feed = (() => {
     gateEl.addEventListener('click', onGateClick);
     gateEl.addEventListener('submit', onSetupSubmit);
     Player.subscribe(onPlayer);
-    document.addEventListener('earshot:change', (e) => { if (e.detail === 'saved') syncSaveButtons(); });
+    document.addEventListener('earshot:change', (e) => {
+      if (e.detail === 'saved') syncSaveButtons();
+      /* Taste reset / unblock on the Stats page: rebuild "For you" next time it's shown. */
+      if (e.detail === 'taste-reset') state.stale = true;
+    });
     document.addEventListener('earshot:auth', () => {
       if (Spotify.isLoggedIn()) return;
       state.unlocked = false;
@@ -70,34 +64,45 @@ const Feed = (() => {
       });
     });
 
+    initSwipe();
+
     $$('.chip').forEach((chip) => chip.addEventListener('click', () => onChip(chip)));
     $('#search-form').addEventListener('submit', onSearch);
 
     if (!Spotify.clientId()) setGate('setup');
     else if (!Spotify.isLoggedIn()) setGate('login', authResult && authResult.error);
-    else reload('mix');
+    else if (!Spotify.hasScopes()) setGate('login', RECONNECT_MSG);
+    else reload('foryou');
   }
+
+  const RECONNECT_MSG = 'Earshot now builds “For you” and the quiz from your Spotify listening. Connect once more to allow read-only access.';
 
   /* ---------------- loading songs ---------------- */
 
   function seedsFor(genre, query) {
     if (genre === 'search') return [{ q: query, genre: '' }];
-    const pick = genre === 'mix' ? Object.values(GENRES) : [GENRES[genre]];
-    return shuffle(pick.flatMap((g) => g.seeds.map((q) => ({ q, genre: g.label }))));
+    if (genre === 'foryou') return Taste.seeds();
+    return shuffle(GENRES[genre].seeds.map((q) => ({ q, genre: GENRES[genre].label })));
   }
 
-  /* Hands out the next searches: every seed at page 1, then every seed at
-     page 2, and so on, like reading the first page of every result list
-     before any second page. */
+  /* Hands out the next searches, cycling through the seeds. Each seed
+     remembers how far it has paged (offsets), so it's page 1 of every
+     seed, then page 2 of every seed, and so on. "For you" re-rolls its
+     seeds on every lap, so what you did a minute ago already counts. */
   function nextQueries(n) {
     const out = [];
-    while (out.length < n) {
+    let guard = 0;
+    while (out.length < n && guard++ < state.seeds.length * 2 + 4) {
       if (state.cursor >= state.seeds.length) {
         state.cursor = 0;
-        state.round++;
-        if (state.round >= MAX_ROUNDS) break;
+        if (state.genre === 'foryou') state.seeds = Taste.seeds();
       }
-      out.push({ ...state.seeds[state.cursor++], offset: state.round * Spotify.LIMIT });
+      const seed = state.seeds[state.cursor++];
+      if (!seed) break;
+      const offset = state.offsets.get(seed.q) || 0;
+      if (offset >= MAX_ROUNDS * Spotify.LIMIT) continue; // this seed is used up
+      state.offsets.set(seed.q, offset + Spotify.LIMIT);
+      out.push({ ...seed, offset });
     }
     return out;
   }
@@ -105,15 +110,17 @@ const Feed = (() => {
   async function reload(genre, query = '') {
     const req = ++state.requestId;
     Object.assign(state, {
-      genre, query, seeds: seedsFor(genre, query), cursor: 0, round: 0,
-      tracks: [], cards: [], loading: false, exhausted: false, lastError: null, active: -1,
+      genre, query, seeds: [], cursor: 0,
+      tracks: [], cards: [], loading: false, exhausted: false, lastError: null, active: -1, stale: false,
     });
     state.seen.clear();
+    state.offsets.clear();
     markedCard = null;
     if (Player.owner() === 'feed') Player.pause();
 
     observer.disconnect();
     feedEl.innerHTML = '';
+    feedEl.classList.remove('has-cards');
     statusEl = document.createElement('div');
     statusEl.className = 'card card-status';
     feedEl.appendChild(statusEl);
@@ -122,8 +129,14 @@ const Feed = (() => {
 
     if (!Spotify.clientId()) { setGate('setup'); return; }
     if (!Spotify.isLoggedIn()) { setGate('login'); return; }
+    if (!Spotify.hasScopes()) { state.unlocked = false; setGate('login', RECONNECT_MSG); return; }
 
     if (!state.unlocked) setGate('loading');
+    setStatus('loading');
+    /* "For you" needs your top artists first (cached for a few hours). */
+    if (genre === 'foryou') await Taste.refreshTop();
+    if (req !== state.requestId) return;
+    state.seeds = seedsFor(genre, query);
     await loadMore();
     if (req !== state.requestId) return; // a newer reload started meanwhile
     if (state.lastError instanceof AuthError) return; // the auth listener already showed the login gate
@@ -195,6 +208,7 @@ const Feed = (() => {
     for (const t of batch) {
       const key = dedupeKey(t);
       if (state.seen.has(t.id) || state.seen.has(key)) continue;
+      if (Taste.isBlocked(t)) continue; // an artist you marked "Not for me"
       state.seen.add(t.id);
       state.seen.add(key);
       const index = state.tracks.push(t) - 1;
@@ -203,7 +217,16 @@ const Feed = (() => {
       frag.appendChild(card);
       fresh.push(card);
     }
+    /* Scroll-snap "re-snapping": after the layout changes, browsers keep
+       you snapped to the same element. If that element is the status card
+       (first load, or you reached the end while more songs were loading),
+       new cards would pile up ABOVE you unseen. So we move to them. */
+    const wasEmpty = state.cards.length === fresh.length;
+    const atStatus = !wasEmpty && Math.abs(feedEl.scrollTop - statusEl.offsetTop) < 4;
     feedEl.insertBefore(frag, statusEl); // the status card always stays last
+    feedEl.classList.toggle('has-cards', state.cards.length > 0);
+    if (fresh.length && wasEmpty) feedEl.scrollTop = 0;
+    else if (fresh.length && atStatus) feedEl.scrollTop = fresh[0].offsetTop;
     fresh.forEach((card) => observer.observe(card));
     Pool.add(fresh.map((c) => state.tracks[c.dataset.index]));
     return fresh.length;
@@ -226,8 +249,10 @@ const Feed = (() => {
           ${t.genre ? `<span class="card-genre">${escapeHtml(t.genre)}</span>` : ''}
         </p>
         <div class="cover" data-action="toggle">
-          ${t.artwork ? `<img src="${escapeHtml(t.artwork)}" alt="" width="640" height="640" loading="lazy" decoding="async">` : ''}
+          ${t.artwork ? `<img src="${escapeHtml(t.artwork)}" alt="" width="640" height="640" loading="lazy" decoding="async" draggable="false">` : ''}
           <span class="cover-badge" aria-hidden="true">${Icons.play}</span>
+          <span class="stamp stamp-like" aria-hidden="true">Like</span>
+          <span class="stamp stamp-nope" aria-hidden="true">Nope</span>
         </div>
         <div class="card-info">
           <h2 class="card-title">${escapeHtml(t.title)}</h2>
@@ -238,7 +263,8 @@ const Feed = (() => {
         <div class="actions">
           <button type="button" class="btn-play" data-action="toggle" aria-label="Play ${escapeHtml(t.title)}">${Icons.play}</button>
           <button type="button" class="btn-save" data-action="save" aria-pressed="${saved}" aria-label="Save ${escapeHtml(t.title)} to library">${Icons.heart}</button>
-          <a class="btn-link" href="${escapeHtml(t.url)}" target="_blank" rel="noopener">Open in Spotify ${Icons.external}<span class="visually-hidden"> (opens in new tab)</span></a>
+          <button type="button" class="btn-nope" data-action="nope" aria-label="Not for me: no more ${escapeHtml(Taste.primaryArtist(t))}" title="Not for me">${Icons.ban}</button>
+          <a class="btn-link" href="${escapeHtml(t.url)}" target="_blank" rel="noopener" aria-label="Open ${escapeHtml(t.title)} in Spotify (new tab)"><span class="btn-link-text">Open in Spotify</span>${Icons.external}</a>
         </div>
       </div>`;
     /* The blurred background uses the SMALLEST artwork (64px): after a 48px
@@ -276,6 +302,14 @@ const Feed = (() => {
 
   function setActive(index) {
     if (index === state.active || !state.cards[index]) return;
+    /* Implicit feedback: you looked at the previous song for a moment but
+       moved on before 4 seconds of it played → a small "skip" signal. */
+    const prev = state.tracks[state.active];
+    if (prev && state.unlocked && Date.now() - state.activeSince > 1500
+        && Player.isCurrent(prev.id, 'feed') && Player.listenedMs() < 4000) {
+      Taste.signal(prev, 'skip');
+    }
+    state.activeSince = Date.now();
     if (state.cards[state.active]) state.cards[state.active].classList.remove('is-active');
     state.active = index;
     const card = state.cards[index];
@@ -294,9 +328,13 @@ const Feed = (() => {
     Player.play(t, 'feed');
   }
 
+  /* Scrolls to a card, stepping over hidden ones ("Not for me" artists). */
   function go(index) {
-    const i = Math.max(0, Math.min(index, state.cards.length - 1));
-    const target = index > i ? statusEl : state.cards[i];
+    const dir = index >= state.active ? 1 : -1;
+    let i = index;
+    while (state.cards[i] && state.cards[i].hidden) i += dir;
+    if (i < 0) return;
+    const target = i >= state.cards.length ? statusEl : state.cards[i];
     if (target) target.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: 'start' });
   }
 
@@ -313,14 +351,131 @@ const Feed = (() => {
     const t = state.tracks[index];
     if (!t) return;
 
+    if (suppressClick) return; // this "click" was really the end of a swipe
     if (action === 'toggle') {
       if (!state.unlocked) { start(); return; }
       if (index !== state.active) { go(index); return; }
       if (Player.isCurrent(t.id, 'feed')) Player.toggle(); else playActive();
     } else if (action === 'save') {
       const saved = Saved.toggle(t);
+      if (saved) Taste.signal(t, 'save');
       toast(saved ? `Saved “${t.title}” to your Library` : 'Removed from Library');
+    } else if (action === 'nope') {
+      nope(index);
     }
+  }
+
+  /* Swipe right / → : like = save to Library + strong "more like this". */
+  function like(index) {
+    const t = state.tracks[index];
+    if (!t) return;
+    if (!Saved.has(t.id)) Saved.toggle(t);
+    Taste.signal(t, 'save');
+    state.activeSince = Date.now(); // an explicit choice, so don't also count it as a skip
+    toast(`♥ Liked “${t.title}”: saved to your Library`);
+    go(index + 1);
+  }
+
+  /* Swipe left / ← / the ⦸ button: "Not for me". */
+  function nope(index) {
+    const t = state.tracks[index];
+    if (!t) return;
+    const artist = Taste.primaryArtist(t);
+    Taste.signal(t, 'dislike');
+    state.activeSince = Date.now(); // already counted as a dislike, not a skip
+    /* Hide this artist's other songs that are already loaded further down. */
+    state.cards.forEach((c, i) => {
+      if (i > index && Taste.primaryArtist(state.tracks[i]) === artist) c.hidden = true;
+    });
+    toast(`Got it: no more ${artist}. Undo on the Stats page.`);
+    go(index + 1);
+  }
+
+  /* ---------------- swipe left / right ----------------
+     Pointer Events cover touch, mouse and pen with one API. The cards have
+     `touch-action: pan-y` (style.css): the browser keeps handling vertical
+     scrolling natively, and only horizontal drags reach this code. A drag
+     must be clearly sideways (more X than Y) before it counts, otherwise
+     it's treated as a normal scroll. */
+  let suppressClick = false;
+
+  function initSwipe() {
+    let card = null;
+    let body = null;
+    let startX = 0;
+    let startY = 0;
+    let dx = 0;
+    let dragging = false;
+    let pointerId = null;
+    const threshold = () => Math.max(90, feedEl.clientWidth * 0.28);
+
+    feedEl.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      const c = e.target.closest('.card[data-index]');
+      if (!c || !state.unlocked || Number(c.dataset.index) !== state.active) return;
+      card = c;
+      body = c.querySelector('.card-body');
+      startX = e.clientX;
+      startY = e.clientY;
+      dx = 0;
+      dragging = false;
+      pointerId = e.pointerId;
+    });
+
+    feedEl.addEventListener('pointermove', (e) => {
+      if (!card || e.pointerId !== pointerId) return;
+      const mx = e.clientX - startX;
+      const my = e.clientY - startY;
+      if (!dragging) {
+        if (Math.abs(mx) > 12 && Math.abs(mx) > Math.abs(my) * 1.3) {
+          dragging = true;
+          card.classList.add('is-dragging');
+          try { card.setPointerCapture(pointerId); } catch (err) { /* not critical */ }
+        } else if (Math.abs(my) > 12) {
+          card = null; // it's a vertical scroll: hands off
+          return;
+        } else {
+          return;
+        }
+      }
+      dx = mx;
+      /* The card follows your finger and tilts a little, like a real card. */
+      body.style.transform = `translateX(${dx}px) rotate(${dx / 28}deg)`;
+      card.style.setProperty('--swipe', String(Math.max(-1, Math.min(1, dx / threshold()))));
+    });
+
+    const finish = (e) => {
+      if (!card || e.pointerId !== pointerId) return;
+      const c = card;
+      const b = body;
+      card = null;
+      if (!dragging) return;
+      c.classList.remove('is-dragging');
+      /* A drag ends with a "click" on whatever is under the finger; ignore it. */
+      suppressClick = true;
+      setTimeout(() => { suppressClick = false; }, 60);
+
+      const index = Number(c.dataset.index);
+      const settle = () => { b.style.transform = ''; c.style.setProperty('--swipe', '0'); };
+      if (e.type !== 'pointercancel' && Math.abs(dx) >= threshold()) {
+        const dir = dx > 0 ? 1 : -1;
+        if (!prefersReducedMotion()) {
+          b.classList.add('is-flying');
+          b.style.transform = `translateX(${dir * 120}vw) rotate(${dir * 18}deg)`;
+        }
+        setTimeout(() => {
+          if (dir > 0) like(index); else nope(index);
+          /* Put the card back quietly once it's scrolled away. */
+          setTimeout(() => { b.classList.remove('is-flying'); settle(); }, 450);
+        }, prefersReducedMotion() ? 0 : 180);
+      } else {
+        b.classList.add('is-flying'); // reuse the transition to spring back
+        settle();
+        setTimeout(() => b.classList.remove('is-flying'), 300);
+      }
+    };
+    feedEl.addEventListener('pointerup', finish);
+    feedEl.addEventListener('pointercancel', finish);
   }
 
   function onChip(chip) {
@@ -380,13 +535,13 @@ const Feed = (() => {
     }
     const labels = { login: 'Connect Spotify', loading: 'Tuning in…', ready: 'Tap to start', resume: 'Tap to resume', error: 'Try again' };
     const extras = mode === 'login' ? `
-      <p class="gate-small">You’ll log in on spotify.com. Earshot never sees your password.</p>
+      <p class="gate-small">You’ll log in on spotify.com. Earshot never sees your password. It asks only to <em>read</em> your top artists and recent plays, to tune “For you” and build your quiz. That data stays in this browser.</p>
       ${Spotify.hasConfigClientId() ? '' : '<button type="button" class="text-btn" data-gate="change-id">Change Client ID</button>'}`
       /* On errors, offer a way out: log out and pick a different account. */
       : mode === 'error' && Spotify.isLoggedIn()
         ? '<button type="button" class="text-btn" data-gate="logout">Disconnect and log in with another account</button>'
         : '';
-    gateBody.innerHTML = `${mode === 'login' || mode === 'ready' ? '<p class="gate-tag">New music, one swipe at a time. Swipe to skip, heart to keep.</p>' : ''}
+    gateBody.innerHTML = `${mode === 'login' || mode === 'ready' ? '<p class="gate-tag">New music, one swipe at a time. Swipe up for the next song, right to like, left to pass.</p>' : ''}
       ${msg}${bigButton(labels[mode], mode === 'loading')}${extras}`;
   }
 
@@ -439,7 +594,12 @@ const Feed = (() => {
     const card = state.cards[state.active];
     const isActiveTrack = card && track && card.dataset.id === String(track.id);
     if (type === 'time' && isActiveTrack) setProgress(card, Player.progress());
-    if (type === 'ended' && isActiveTrack) go(state.active + 1);
+    if (type === 'ended' && isActiveTrack) { Taste.signal(track, 'complete'); go(state.active + 1); }
+    if (type === 'stuck' && isActiveTrack) {
+      card.classList.add('is-broken');
+      toast('This song got stuck loading. Skipping.');
+      go(state.active + 1);
+    }
     if (type === 'stalled' && isActiveTrack) {
       if (state.playWasTapped) {
         /* You tapped play and it still didn't start: skip this one. */
@@ -485,6 +645,7 @@ const Feed = (() => {
   /* ---------------- view lifecycle (called by app.js) ---------------- */
 
   function onShow() {
+    if (state.stale && state.genre === 'foryou' && Spotify.isLoggedIn()) { reload('foryou'); return; }
     const card = state.cards[state.active];
     /* display:none can reset a scroll position, so put it back. */
     if (card) feedEl.scrollTop = card.offsetTop;
@@ -506,6 +667,8 @@ const Feed = (() => {
     if (!gateEl.hidden) return; // the gate's own buttons handle Enter/Space
     if (key === 'ArrowDown' || key === 'PageDown' || key === 'j') { e.preventDefault(); go(state.active + 1); }
     else if (key === 'ArrowUp' || key === 'PageUp' || key === 'k') { e.preventDefault(); go(state.active - 1); }
+    else if (key === 'ArrowRight' && state.unlocked) { e.preventDefault(); like(state.active); }
+    else if (key === 'ArrowLeft' && state.unlocked) { e.preventDefault(); nope(state.active); }
     else if (key === ' ' && !onControl) {
       /* Space on a focused button should still press that button, so we
          only take it over when focus is elsewhere. */

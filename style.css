@@ -139,6 +139,8 @@ code { font-family: var(--mono); font-size: .88em; background: var(--ink-3); pad
 .chip:hover { border-color: var(--paper); }
 .chip[aria-pressed="true"] { background: var(--paper); color: var(--ink); border-color: var(--paper); }
 .chip-search::before { content: "⌕ "; }
+.chip-foryou::before { content: "● "; color: var(--signal); }
+.chip-foryou[aria-pressed="true"]::before { color: var(--signal); }
 .chip-search[aria-expanded="true"] { border-color: var(--signal); }
 
 .search { display: flex; gap: 8px; padding: 10px 16px 0; }
@@ -184,7 +186,14 @@ code { font-family: var(--mono); font-size: .88em; background: var(--ink-3); pad
   /* content-visibility: skip rendering work for cards far off-screen. */
   content-visibility: auto;
   contain-intrinsic-size: auto 100vh;
+  /* pan-y: the browser handles vertical scrolling itself and passes
+     horizontal drags to our swipe code (feed.js). */
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+  --swipe: 0;
 }
+.card img { -webkit-touch-callout: none; }
 .card-bg {
   position: absolute; inset: -12%;
   background-size: cover; background-position: center;
@@ -199,6 +208,7 @@ code { font-family: var(--mono); font-size: .88em; background: var(--ink-3); pad
 
 .card-body {
   position: relative; z-index: 1;
+  will-change: transform;
   width: min(100% - 32px, 460px);
   padding: var(--header-h) 0 calc(18px + var(--dock-space));
   height: 100%;
@@ -269,7 +279,14 @@ code { font-family: var(--mono); font-size: .88em; background: var(--ink-3); pad
 .btn-save svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; }
 .btn-save[aria-pressed="true"] { background: var(--paper); color: var(--signal); border-color: var(--paper); }
 .btn-save[aria-pressed="true"] svg { fill: currentColor; }
-.btn-play:active, .btn-save:active { transform: scale(.92); }
+.btn-nope {
+  width: 44px; height: 44px; display: grid; place-items: center; border-radius: 50%; flex: none;
+  background: rgba(15, 14, 13, .45); border: 1px solid rgba(243, 237, 226, .25); color: var(--paper-dim);
+  transition: transform .15s var(--ease), color .2s, border-color .2s;
+}
+.btn-nope svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.btn-nope:hover { color: var(--paper); border-color: var(--paper-dim); }
+.btn-play:active, .btn-save:active, .btn-nope:active { transform: scale(.92); }
 .btn-link {
   margin-left: auto; display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 14px;
   border-radius: 999px; border: 1px solid rgba(243, 237, 226, .35); text-decoration: none;
@@ -279,10 +296,51 @@ code { font-family: var(--mono); font-size: .88em; background: var(--ink-3); pad
 .btn-link:hover { border-color: var(--paper); }
 .btn-link svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; }
 
+/* ---------- Phones ---------- */
+@media (max-width: 480px) {
+  :root { --header-h: 104px; }
+  .feed-top { padding-top: calc(8px + env(safe-area-inset-top)); padding-bottom: 12px; }
+  .feed-top-row { padding-bottom: 8px; }
+  .wordmark { font-size: 22px; }
+  .chip { min-height: 36px; padding: 8px 12px; font-size: 11.5px; }
+  .card-body { width: calc(100% - 28px); gap: 10px; padding-bottom: calc(12px + var(--dock-space)); }
+  .card-title { font-size: clamp(24px, 7vw, 32px); }
+  .card-artist { font-size: 13px; }
+  .actions { gap: 10px; }
+  .btn-play { width: 56px; height: 56px; }
+  .btn-save { width: 48px; height: 48px; }
+  /* Four buttons must fit a 360px phone: the Spotify link becomes an icon. */
+  .btn-link { width: 48px; height: 48px; min-height: 0; padding: 0; justify-content: center; border-radius: 50%; }
+  .btn-link-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .btn-link svg { width: 18px; height: 18px; }
+  .dock { width: calc(100% - 16px); bottom: calc(var(--tabbar-h) + 6px); }
+  .toast { bottom: calc(var(--tabbar-h) + var(--dock-space) + 10px); }
+}
+/* Short phones (e.g. iPhone SE): keep the cover from squeezing the controls. */
+@media (max-height: 700px) {
+  :root { --header-h: 98px; }
+  .card-album { display: none; }
+  .card-cat { display: none; }
+}
+
 .card.is-broken .cover { filter: grayscale(1) opacity(.5); }
+
+/* Swipe feedback: LIKE / NOPE stamps fade in as you drag (driven by --swipe,
+   which goes from -1 (full left) to 1 (full right)). */
+.card-body.is-flying { transition: transform .3s var(--ease); }
+.stamp {
+  position: absolute; top: 14px; z-index: 2; padding: 6px 12px; border-radius: 6px;
+  font-family: var(--mono); font-size: 20px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
+  border: 3px solid currentColor; background: rgba(15, 14, 13, .55);
+  opacity: 0; pointer-events: none;
+}
+.stamp-like { left: 14px; color: var(--good); transform: rotate(-12deg); opacity: max(0, var(--swipe)); }
+.stamp-nope { right: 14px; color: var(--bad); transform: rotate(12deg); opacity: max(0, calc(var(--swipe) * -1)); }
 
 /* Status card at the end of the feed (loading / end / error). */
 .card-status { background: var(--ink); }
+/* The status card only becomes a snap point once songs exist (see append() in feed.js). */
+.feed:not(.has-cards) .card-status { scroll-snap-align: none; }
 .card-status::after { display: none; }
 .status-inner { position: relative; z-index: 1; text-align: center; padding: 0 24px calc(var(--dock-space)); max-width: 420px; }
 .status-big { font-size: 28px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.1; margin: 0 0 10px; }
@@ -447,6 +505,14 @@ code { font-family: var(--mono); font-size: .88em; background: var(--ink-3); pad
   background: repeating-linear-gradient(90deg, var(--signal) 0 7px, transparent 7px 10px);
 }
 
+.taste-line { margin: 0 0 10px; color: var(--paper-dim); }
+.taste-line strong { color: var(--paper); }
+.tags { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; padding: 0; list-style: none; }
+.tag {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; border-radius: 999px;
+  border: 1px solid var(--line); font-family: var(--mono); font-size: 12px; letter-spacing: .04em;
+}
+.tag button { background: none; border: 0; color: var(--signal); font-family: var(--mono); font-size: 12px; padding: 6px 0 6px 4px; text-decoration: underline; text-underline-offset: 3px; }
 .notes { margin-top: 40px; border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 18px; }
 .notes summary { cursor: pointer; padding: 14px 0; font-family: var(--mono); font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
 .notes dl { margin: 0 0 18px; }

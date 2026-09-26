@@ -1,20 +1,23 @@
 # Earshot
 
-**A TikTok-style music discovery feed, powered by Spotify.** Swipe (or press ↓) through full-screen song cards; each one starts playing when it snaps into view. Heart the ones you like, and the site keeps a listening history that powers stats and a quiz about the music you've actually heard.
+**A TikTok-style music discovery feed, powered by Spotify.** Swipe up (or press ↓) through full-screen song cards; each one starts playing when it snaps into view. Swipe **right to like**, **left to pass**. The "For you" station learns from your Spotify top artists and from what you do, and the quiz asks about the songs you actually play on Spotify.
 
 It's plain HTML, CSS and vanilla JavaScript: no framework, no build step, no backend. It runs free on GitHub Pages.
 
 ## Features
 
-- **Feed**: full-screen scroll-snap cards with the cover art blurred into each card's background. Auto-play and pause via IntersectionObserver. Stations (Mix, Pop, Hip-hop, Rock, Indie, Electronic, R&B, Chill) plus search. Infinite loading with duplicate filtering. Keyboard: ↑/↓ (or J/K) to move, Space to play/pause.
+- **Feed**: full-screen scroll-snap cards with the cover art blurred into each card's background. Auto-play and pause via IntersectionObserver. Infinite loading with duplicate filtering. Stations: **For you** (default), Pop, Hip-hop, Rock, Indie, Electronic, R&B, Chill, plus search.
+- **Swipes**: right = like (saves to Library, "more like this"), left = not for me (hides that artist, "less like this"). The ⦸ button on each card does the same as a left swipe. Keyboard: ↑/↓ (or J/K) to move, → like, ← pass, Space to play/pause.
+- **For you**: Spotify has closed its recommendation endpoints to new apps, so Earshot has a small recommender of its own. Your Spotify top artists decide which genres to lean on (e.g. Sade + Frank Ocean → mostly R&B/soul), and hearts, full listens, quick skips and "not for me" keep adjusting the scores. A genre you keep rejecting drops out. The Stats page shows what it learned, with undo and reset.
 - **Library**: your saved songs. Play one, open it in Spotify, or remove it.
 - **Stats**: songs heard, total listens, top artists, top genres, recently heard. A song counts as "heard" after 5 seconds of playback.
-- **Quiz**: 10 questions built from your history: *Name that song* (hear a snippet), *Who's the artist?*, and *Which album cover?*. Needs at least 4 heard songs. Your best score is saved.
+- **Quiz**: 10 questions about **your Spotify listening** (recently played + your top songs of the last month, half-year and year): *Name that song* (hear a snippet), *Who's the artist?*, and *Which album cover?*. Songs you only met in the feed are never the answer. Your best score is saved.
 - All your data (library, history, scores, login) stays in your browser's `localStorage`. There's no account and no server.
 
 ## How it uses Spotify (and its limits)
 
 - **Login:** each visitor connects their own Spotify account using the *Authorization Code with PKCE* flow. That flow is designed for sites that can't keep a secret, so the only thing in the code is your app's public **Client ID**.
+- **Permissions (scopes):** the login asks only to *read* two things: `user-top-read` (top artists/songs) and `user-read-recently-played`. Nothing in the account can be changed, and what's read stays in the visitor's browser.
 - **Search:** the Spotify Web API finds the songs for each station.
 - **Playback:** Spotify no longer gives new apps raw 30-second preview files. Songs play through **Spotify's official embedded player** (the small player docked above the tab bar), controlled with Spotify's iFrame API. Visitors logged in to Spotify in the same browser may hear full tracks; everyone else hears 30-second previews.
 - **Development mode:** new Spotify apps start in *development mode*. Only Spotify accounts you add by hand under **User Management** can log in, and Spotify caps that list at a small number of users. Opening the site to everyone requires applying for an extended quota in the Spotify dashboard.
@@ -83,7 +86,8 @@ Then open <http://127.0.0.1:5500/>. Make sure `http://127.0.0.1:5500/` is in you
 | `js/config.js` | **Your Spotify Client ID goes here** |
 | `js/util.js` | Small helpers: HTML escaping, shuffle, toasts, icons |
 | `js/storage.js` | localStorage wrapper that never throws, plus saved songs, history and song pool |
-| `js/spotify.js` | PKCE login, token refresh, Web API search, artist genres |
+| `js/spotify.js` | PKCE login, token refresh, Web API search, top artists/songs, recently played |
+| `js/taste.js` | The "For you" recommender: station seeds, taste scores, likes/skips/blocks |
 | `js/player.js` | The single Spotify embed: play/pause, listen counting, quiz snippets |
 | `js/feed.js` | The feed: stations, infinite loading, de-duplication, IntersectionObserver autoplay, keyboard |
 | `js/library.js`, `js/stats.js`, `js/quiz.js` | The other three views |

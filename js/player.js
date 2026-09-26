@@ -23,6 +23,7 @@ const Player = (() => {
   const SCRIPT_URL = 'https://open.spotify.com/embed/iframe-api/v1';
   const LISTEN_THRESHOLD_MS = 5000;
   const STALL_MS = 8000;
+  const STUCK_MS = 7000; // "playing" but the position hasn't moved for this long
 
   let dock, veil;
   let apiPromise = null;
@@ -40,6 +41,9 @@ const Player = (() => {
   let snippet = null;   // { start, length } waiting to be applied
   let stopAt = null;    // ms position where a quiz snippet stops
   let watchdog = null;
+  let pendingPlay = null;   // id of a track waiting for the embed to finish loading
+  let lastMoveAt = 0;       // when the playback position last changed
+  let recoveries = 0;       // retries used on the current track
   const subscribers = new Set();
 
   const emit = (type) => subscribers.forEach((fn) => fn(type, track, owner));
@@ -48,6 +52,20 @@ const Player = (() => {
     dock = $('#dock');
     veil = $('#dock-veil');
     loadApi().catch(() => {}); // start downloading early; errors surface on first play
+    /* Stuck detector: sometimes the embed says "playing" but the position
+       never moves (a stalled stream). One reload, then give up and let the
+       view skip the song instead of sitting in silence. */
+    setInterval(() => {
+      if (!track || paused || !controller || Date.now() - lastMoveAt < STUCK_MS) return;
+      lastMoveAt = Date.now();
+      if (recoveries++ === 0) {
+        loadedUri = null; // forces a fresh loadUri of the same song
+        play(track, owner);
+      } else {
+        controller.pause();
+        emit('stuck');
+      }
+    }, 2000);
   }
 
   /* The iFrame API script calls window.onSpotifyIframeApiReady when it's
@@ -80,6 +98,11 @@ const Player = (() => {
           let done = false;
           const finish = () => { if (!done) { done = true; controller = c; resolve(c); } };
           c.addListener('ready', finish);
+          /* After loadUri the embed fires 'ready' again once the new song is
+             loaded: the safest moment to press play. */
+          c.addListener('ready', () => {
+            if (pendingPlay && track && track.id === pendingPlay && paused) c.play();
+          });
           setTimeout(finish, 4000);
         });
       })).catch((err) => { controllerPromise = null; throw err; });
@@ -100,7 +123,8 @@ const Player = (() => {
     paused = !!d.isPaused;
     position = d.position || 0;
     duration = d.duration || duration;
-    if (!paused) clearTimeout(watchdog);
+    if (!paused) { clearTimeout(watchdog); pendingPlay = null; }
+    if (position !== prevPos || (!paused && wasPaused)) lastMoveAt = Date.now();
 
     /* Quiz snippet: we can only seek once the track is actually playing. */
     if (snippet && !paused && duration) {
@@ -145,6 +169,7 @@ const Player = (() => {
      background and patch it in (tracks themselves have no genre on Spotify). */
   function recordListen(t) {
     Listens.record(t);
+    Taste.signal(t, 'listen');
     Spotify.artistGenre(t.artistId).then((g) => { if (g) Listens.setGenre(t.id, g); });
   }
 
@@ -162,7 +187,9 @@ const Player = (() => {
       stopAt = null;
       position = 0;
       paused = true;
+      recoveries = 0;
     }
+    lastMoveAt = Date.now();
     snippet = opts.start != null ? { start: opts.start, length: opts.duration || 6 } : null;
 
     /* If nothing starts within a few seconds, tell the views. Usually that
@@ -174,9 +201,14 @@ const Player = (() => {
     const go = (c) => {
       if (loadedUri !== next.uri) {
         loadedUri = next.uri;
+        pendingPlay = playingId;
         c.loadUri(next.uri);
-        /* Give the embed a moment to swap tracks before pressing play. */
-        setTimeout(() => { if (track && track.id === playingId) c.play(); }, 350);
+        /* Press play once the new song is loaded ('ready', see above), with
+           two timed fallbacks in case that event doesn't come. Each checks
+           `paused` so a song that already started isn't restarted. */
+        [400, 2500].forEach((ms) => setTimeout(() => {
+          if (pendingPlay === playingId && track && track.id === playingId && paused) c.play();
+        }, ms));
       } else if (fresh || opts.start != null) {
         /* Same song already in the embed (maybe finished): rewind first. */
         c.seek(0);
@@ -213,6 +245,7 @@ const Player = (() => {
     owner: () => owner,
     track: () => track,
     progress: () => (duration ? Math.min(1, position / duration) : 0),
+    listenedMs: () => listened,
     subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn); },
   };
 })();

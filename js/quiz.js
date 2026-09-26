@@ -1,18 +1,24 @@
 /* ------------------------------------------------------------------
-   quiz.js — ten questions built from YOUR listening history.
+   quiz.js — ten questions about the music YOU play on Spotify.
+
+   The answers come from your real Spotify listening: recently played
+   songs plus your top songs of the last month, half-year and year
+   (read-only, fetched from Spotify and cached here for 30 minutes).
+   New songs you only met in Earshot's feed are never the answer.
 
    Question types:
      name   → hear a snippet, pick the title
      artist → see a title, pick the artist
      cover  → see a title, pick the album art
-   Wrong options ("distractors") come from your history first, then from
-   songs the feed showed you (Pool), then from your saved songs.
+   Wrong options ("distractors") come from your Spotify songs first, then
+   from songs the feed showed you, so they look plausible.
    ------------------------------------------------------------------ */
 
 const QuizView = (() => {
   const ROUND = 10;
   const MIN_HISTORY = 4;
   const TYPES = ['name', 'artist', 'cover'];
+  const CACHE_MS = 30 * 60 * 1000;
 
   /* What makes two options "the same" for each question type. Two songs by
      the same artist would make two identical artist buttons, so we compare
@@ -24,7 +30,9 @@ const QuizView = (() => {
   };
 
   let root;
-  let game = null; // { questions, index, score, answered }
+  let game = null;      // { questions, index, score, answered }
+  let source = null;    // your Spotify songs, once loaded
+  let loadId = 0;       // ignores slow loads that finish after you left
 
   function init() {
     root = $('#quiz-root');
@@ -56,10 +64,33 @@ const QuizView = (() => {
     return { type, answer, options: shuffle([answer, ...picks]) };
   }
 
-  function buildRound() {
-    const history = Listens.all().filter((t) => t.uri);
+  /* Recently played + top songs, merged without duplicates. */
+  async function spotifySongs() {
+    const cached = Store.get('spotifySongs', null);
+    if (cached && Date.now() - cached.at < CACHE_MS && cached.items.length) return cached.items;
+    const results = await Promise.allSettled([
+      Spotify.recentTracks(),
+      Spotify.topTracks('short_term'),
+      Spotify.topTracks('medium_term'),
+      Spotify.topTracks('long_term'),
+    ]);
+    const ok = results.filter((r) => r.status === 'fulfilled');
+    if (!ok.length) {
+      if (cached && cached.items.length) return cached.items;
+      throw results[0].reason;
+    }
+    const seenKeys = new Set();
+    const items = uniqueById(ok.map((r) => r.value))
+      .filter((t) => { const k = dedupeKey(t); return !seenKeys.has(k) && seenKeys.add(k); })
+      .slice(0, 250)
+      .map(slimTrack);
+    Store.set('spotifySongs', { at: Date.now(), items });
+    return items;
+  }
+
+  function buildRound(history) {
     const historyIds = new Set(history.map((t) => t.id));
-    const others = uniqueById([Pool.all(), Saved.all()]).filter((t) => !historyIds.has(t.id));
+    const others = uniqueById([Listens.all(), Pool.all(), Saved.all()]).filter((t) => !historyIds.has(t.id));
 
     /* Walk through your history in random order; if you've heard fewer than
        10 songs, go round again so every round still has 10 questions. */
@@ -87,24 +118,49 @@ const QuizView = (() => {
     renderIntro();
   }
 
-  function renderIntro() {
-    const heard = Listens.all().length;
+  async function renderIntro() {
+    const id = ++loadId;
     const best = Store.get('quizBest', null);
-    if (heard < MIN_HISTORY) {
-      const need = MIN_HISTORY - heard;
+
+    if (!Spotify.isLoggedIn() || !Spotify.hasScopes()) {
       root.innerHTML = `
         <div class="empty">
-          <p class="empty-big">Your ears need a warm-up.</p>
-          <p>The quiz is built from songs you've actually listened to. Let ${need} more song${need === 1 ? '' : 's'} play for at least 5 seconds each, then come back.</p>
-          <div class="meter" aria-hidden="true">${Array.from({ length: MIN_HISTORY }, (_, i) => `<span class="${i < heard ? 'on' : ''}"></span>`).join('')}</div>
-          <p class="muted small">${heard} of ${MIN_HISTORY} heard</p>
-          <a class="pill-btn" href="#feed">Go listen</a>
+          <p class="empty-big">Connect Spotify first.</p>
+          <p>The quiz asks about the songs you actually play on Spotify, so it needs read-only access to your listening. Connect from the Feed tab.</p>
+          <a class="pill-btn" href="#feed">Go to the feed</a>
+        </div>`;
+      return;
+    }
+
+    root.innerHTML = '<p class="lede">Reading your Spotify listening…</p>';
+    try {
+      source = await spotifySongs();
+    } catch (err) {
+      if (id !== loadId) return;
+      root.innerHTML = `
+        <div class="empty">
+          <p class="empty-big">Couldn’t read your Spotify listening.</p>
+          <p>${escapeHtml(err.message)}</p>
+          <button type="button" class="pill-btn" data-action="retry">Try again</button>
+        </div>`;
+      return;
+    }
+    if (id !== loadId) return;
+
+    const n = source.length;
+    if (n < MIN_HISTORY) {
+      root.innerHTML = `
+        <div class="empty">
+          <p class="empty-big">Not enough listening yet.</p>
+          <p>Spotify only has ${n} song${n === 1 ? '' : 's'} in your recent and top lists. Play a few more songs on Spotify and come back.</p>
+          <div class="meter" aria-hidden="true">${Array.from({ length: MIN_HISTORY }, (_, i) => `<span class="${i < n ? 'on' : ''}"></span>`).join('')}</div>
+          <p class="muted small">${n} of ${MIN_HISTORY} songs</p>
         </div>`;
       return;
     }
     root.innerHTML = `
       <div class="quiz-intro">
-        <p class="lede">Ten questions pulled from the ${heard} song${heard === 1 ? '' : 's'} you've heard. Name that tune, match the artist, spot the cover.</p>
+        <p class="lede">Ten questions about the ${n} songs you’ve been playing on Spotify: your recent plays and your all-time favourites. Name that tune, match the artist, spot the cover.</p>
         ${best ? `<p class="best">Best score <strong>${best.score}/10</strong></p>` : ''}
         <button type="button" class="pill-btn pill-btn-big" data-action="start">Start the quiz</button>
       </div>`;
@@ -217,10 +273,11 @@ const QuizView = (() => {
     if (!btn) return;
     const action = btn.dataset.action;
 
+    if (action === 'retry') { renderIntro(); return; }
     if (action === 'start') {
-      const questions = buildRound();
+      const questions = source ? buildRound(source) : null;
       if (!questions) {
-        toast('Not enough variety yet. Scroll the feed a bit more first.');
+        toast('Not enough variety in your songs for a full round yet.');
         return;
       }
       game = { questions, index: 0, score: 0, answered: false, finished: false };
@@ -249,6 +306,7 @@ const QuizView = (() => {
 
   /* Leaving the page mid-question: stop the snippet. */
   function onHide() {
+    loadId++; // a load still in flight shouldn't draw over another page
     if (Player.owner() === 'quiz') Player.pause();
     Player.setVeil(false);
     if (game && game.finished) game = null; // next visit shows the intro again

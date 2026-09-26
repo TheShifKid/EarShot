@@ -14,6 +14,21 @@ const StatsView = (() => {
         toast('Disconnected from Spotify');
         return;
       }
+      const unblock = e.target.closest('[data-action="unblock"]');
+      if (unblock) {
+        Taste.unblock(unblock.dataset.name);
+        render();
+        toast(`${unblock.dataset.name} can show up again`);
+        return;
+      }
+      if (e.target.closest('[data-action="reset-taste"]')) {
+        if (window.confirm('Forget everything “For you” learned (likes, skips, blocked artists)?')) {
+          Taste.reset();
+          render();
+          toast('“For you” starts fresh');
+        }
+        return;
+      }
       if (!e.target.closest('[data-action="clear"]')) return;
       if (window.confirm('Clear your whole listening history? Saved songs and quiz scores stay.')) {
         Listens.clear();
@@ -42,6 +57,27 @@ const StatsView = (() => {
         <span class="bar-value">${n} play${n === 1 ? '' : 's'}</span>
         <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="width:${Math.max(6, (n / max) * 100)}%"></span></span>
       </li>`).join('')}</ol>`;
+  }
+
+  /* What "For you" is working from, in plain words, with ways to undo. */
+  function tasteBlock() {
+    const t = Taste.summary();
+    const list = (names) => names.map((n) => escapeHtml(n)).join(', ');
+    return `
+      <section class="block" aria-labelledby="h-taste">
+        <h2 id="h-taste" class="block-title">Your taste (For you)</h2>
+        ${t.top.length
+          ? `<p class="taste-line">From your Spotify: <strong>${list(t.top.slice(0, 8).map((a) => a.name))}</strong></p>`
+          : '<p class="taste-line">Your Spotify top artists will appear here once you’re connected.</p>'}
+        ${t.leaning.length ? `<p class="taste-line">Leaning towards: <strong>${list(t.leaning)}</strong></p>` : ''}
+        ${t.avoiding.length ? `<p class="taste-line">Skipping: <strong>${list(t.avoiding)}</strong></p>` : ''}
+        ${t.blocked.length ? `
+          <p class="taste-line">Not for me:</p>
+          <ul class="tags">${t.blocked.map((n) => `
+            <li class="tag">${escapeHtml(n)} <button type="button" data-action="unblock" data-name="${escapeHtml(n)}" aria-label="Unblock ${escapeHtml(n)}">undo</button></li>`).join('')}
+          </ul>` : ''}
+        <button type="button" class="text-btn" data-action="reset-taste">Reset what For you learned</button>
+      </section>`;
   }
 
   function render() {
@@ -82,6 +118,8 @@ const StatsView = (() => {
         ${history.length ? '<button type="button" class="text-btn" data-action="clear">Clear listening history</button>' : ''}
       </section>
 
+      ${tasteBlock()}
+
       ${Spotify.isLoggedIn() ? '<section class="block"><h2 class="block-title">Account</h2><p class="muted">Connected to Spotify in this browser.</p><button type="button" class="text-btn" data-action="logout">Disconnect Spotify</button></section>' : ''}
 
       <details class="notes">
@@ -97,6 +135,8 @@ const StatsView = (() => {
           <dd>A static site can't hide a password-like “client secret”, so the login uses PKCE: we send Spotify a hash of a random string, and later prove we own it by sending the original. Your Spotify password only ever goes to spotify.com.</dd>
           <dt>Spotify Web API + embed</dt>
           <dd>Searches go to the Spotify Web API. Spotify doesn't give new apps raw audio, so songs play through Spotify's official embedded player, driven by its iFrame API (<code>loadUri</code>, <code>play</code>, <code>pause</code>). The embed reports its position back to us, which is how the site counts listens and knows when a song ends.</dd>
+          <dt>“For you” recommendations</dt>
+          <dd>Spotify no longer lets new apps use its recommendation engine, so Earshot has a small one of its own. Your Spotify top artists decide which genres to lean on, and what you do here (hearts, full listens, quick skips, “Not for me”) nudges the scores. This is called learning from implicit feedback: the site watches behaviour instead of asking for ratings.</dd>
           <dt>localStorage</dt>
           <dd>Your library, history and scores live only in this browser. No account, no server. Clear your site data and they're gone.</dd>
         </dl>
